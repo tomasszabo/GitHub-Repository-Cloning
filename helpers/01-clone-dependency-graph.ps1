@@ -1,7 +1,7 @@
 #!/usr/bin/env pwsh
 param(
   [Parameter(Mandatory = $true)]
-  [string]$SourceUrl,                    # e.g. https://github.com/skills/exercise-toolkit
+  [string[]]$SourceUrl,                  # e.g. @('https://github.com/skills/exercise-toolkit')
 
   [string]$OutDir = "./exercise-toolkit-mirror",
 
@@ -35,7 +35,7 @@ function Repo-ToDir([string]$clonesDir, [string]$repo) {
 }
 
 function Clone-IfNeeded(
-  [string]$sourceHost,
+  [string]$sourceUrl,
   [string]$repo,
   [string]$clonesDir,
   [System.Collections.Generic.HashSet[string]]$reposSet
@@ -43,7 +43,7 @@ function Clone-IfNeeded(
   $dir = Repo-ToDir -clonesDir $clonesDir -repo $repo
   if (Test-Path (Join-Path $dir ".git")) { return $true }
 
-  $url = "https://$sourceHost/$repo.git"
+  $url = "$sourceUrl/$repo.git"
   Write-Host "  Cloning $url"
   try {
     git clone --quiet $url $dir | Out-Null
@@ -132,8 +132,27 @@ function Extract-ExternalActionsFromYaml([string]$yamlFile) {
 # ---------------------------------------------------------------------------
 Test-Command git
 
-$sourceHost = Parse-HostFromUrl $SourceUrl
-$rootRepo   = Parse-RepoNwoFromUrl $SourceUrl
+$sourceRepos = New-Object System.Collections.Generic.List[object]
+$seenRoots = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+
+foreach ($url in $SourceUrl) {
+  if ([string]::IsNullOrWhiteSpace($url)) { continue }
+
+  $sourceHost = Parse-HostFromUrl $url
+  $rootRepo   = Parse-RepoNwoFromUrl $url
+  $sourceBaseUrl = "https://$sourceHost"
+
+  if ($seenRoots.Add("$sourceBaseUrl/$rootRepo")) {
+    $sourceRepos.Add([pscustomobject]@{
+      SourceBaseUrl = $sourceBaseUrl
+      RootRepo      = $rootRepo
+    })
+  }
+}
+
+if ($sourceRepos.Count -eq 0) {
+  throw "At least one non-empty SourceUrl must be provided."
+}
 
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $OutDir    = (Resolve-Path -LiteralPath $OutDir).Path
@@ -156,18 +175,24 @@ $bundledSet = [System.Collections.Generic.HashSet[string]]::new(
 )
 
 $repos     = New-Object System.Collections.Generic.HashSet[string]
+$repoSourceBaseUrl = @{}
 
 # ---------------------------------------------------------------------------
 # First run: BFS discovery
 # ---------------------------------------------------------------------------
-$toScan    = @{ $rootRepo = $null }
+$toScan    = @{}
 $processed = New-Object System.Collections.Generic.HashSet[string]
 $refsMap   = @{}
 
 $queue = New-Object System.Collections.Generic.Queue[string]
-$queue.Enqueue($rootRepo)
 
-Write-Host "Discovering dependencies from $rootRepo..."
+foreach ($sourceRepo in $sourceRepos) {
+  $queue.Enqueue($sourceRepo.RootRepo)
+  $toScan[$sourceRepo.RootRepo] = $null
+  $repoSourceBaseUrl[$sourceRepo.RootRepo] = $sourceRepo.SourceBaseUrl
+}
+
+Write-Host "Discovering dependencies from $($sourceRepos.Count) root repo(s)..."
 Write-Host "Skipping bundled owners: $($BundledOwners -join ', ')"
 Write-Host ""
 
@@ -183,7 +208,13 @@ while ($queue.Count -gt 0) {
     continue
   }
 
-  $ok = Clone-IfNeeded -sourceHost $sourceHost -repo $nextRepo -clonesDir $clonesDir -reposSet $repos
+  if (-not $repoSourceBaseUrl.ContainsKey($nextRepo)) {
+    Write-Warning "No source host registered for $nextRepo, skipping."
+    continue
+  }
+
+  $sourceBaseUrl = $repoSourceBaseUrl[$nextRepo]
+  $ok = Clone-IfNeeded -sourceUrl $sourceBaseUrl -repo $nextRepo -clonesDir $clonesDir -reposSet $repos
   if (-not $ok) { continue }
 
   $repoDir   = Repo-ToDir -clonesDir $clonesDir -repo $nextRepo
@@ -211,10 +242,16 @@ while ($queue.Count -gt 0) {
       if (-not $toScan.ContainsKey($d.Repo)) {
         # First time seeing this repo: register the specific file to scan and enqueue
         $toScan[$d.Repo] = [System.Collections.Generic.List[string]]@($d.ScanFile)
+        $repoSourceBaseUrl[$d.Repo] = $sourceBaseUrl
         $queue.Enqueue($d.Repo)
       } else {
         # Already queued: add the new file if not already tracked
         $existing = $toScan[$d.Repo]
+
+        if ($repoSourceBaseUrl[$d.Repo] -ne $sourceBaseUrl) {
+          throw "Repo '$($d.Repo)' was discovered from multiple source hosts ('$($repoSourceBaseUrl[$d.Repo])' and '$sourceBaseUrl')."
+        }
+
         if ($null -ne $existing -and -not $existing.Contains($d.ScanFile)) {
           $existing.Add($d.ScanFile)
         }
@@ -234,7 +271,7 @@ foreach ($r in ($processed | Sort-Object)) {
 
 "source_url,local_path" | Set-Content -LiteralPath $cloneMapFile -Encoding UTF8
 foreach ($r in $reposSorted) {
-  $src = "https://$sourceHost/$r.git"
+  $src = "$($repoSourceBaseUrl[$r])/$r.git"
   $lp  = Repo-ToDir -clonesDir $clonesDir -repo $r
   Add-Content -LiteralPath $cloneMapFile -Encoding UTF8 -Value ('"{0}","{1}"' -f $src, $lp)
 }
@@ -245,4 +282,7 @@ Write-Host "Repos cloned:     $($reposSorted.Count)"
 Write-Host "repos.txt:        $reposFile"
 Write-Host "refs-by-repo.csv: $refsFile"
 Write-Host "clone-map.csv:    $cloneMapFile"
-Write-Host "Root local path:  $(Repo-ToDir -clonesDir $clonesDir -repo $rootRepo)"
+Write-Host "Root local paths:"
+foreach ($sourceRepo in $sourceRepos) {
+  Write-Host "  $(Repo-ToDir -clonesDir $clonesDir -repo $sourceRepo.RootRepo)"
+}

@@ -3,13 +3,13 @@
 # clone-repository.ps1
 #
 # Wraps the three migration scripts end-to-end:
-#   1. Clone the source repo and its full GitHub Actions dependency graph
+#   1. Clone the source repos and their full GitHub Actions dependency graph
 #   2. Rewrite all `uses:` owner references to the target org and commit
 #   3. Push every cloned repo to the target GHE instance
 #
 # Usage:
 #   ./clone-repository.ps1 `
-#     -SourceUrl  https://github.com/skills/exercise-toolkit `
+#     -SourceUrl  @('https://github.com/skills/exercise-toolkit', 'https://github.com/actions/checkout') `
 #     -TargetHost ghe.company.com `
 #     -TargetOrg  my-org
 #
@@ -25,7 +25,7 @@
 
 param(
   [Parameter(Mandatory = $true)]
-  [string]$SourceUrl,
+  [string[]]$SourceUrl,
 
   [Parameter(Mandatory = $true)]
   [string]$TargetHost,
@@ -56,12 +56,13 @@ if ([string]::IsNullOrWhiteSpace($Visibility)) {
 Write-Host "Repo visibility: $Visibility"
 
 $OutDir = (New-Item -ItemType Directory -Force -Path $OutDir).FullName
+$sourceUrlsDisplay = $SourceUrl -join ', '
 
 # ---------------------------------------------------------------------------
 # Step 1 — Clone source repo and all transitive action dependencies
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "=== Step 1: Cloning dependency graph from $SourceUrl ==="
+Write-Host "=== Step 1: Cloning dependency graph from $sourceUrlsDisplay ==="
 & "$ScriptsDir/helpers/01-clone-dependency-graph.ps1" -SourceUrl $SourceUrl -OutDir $OutDir
 
 # ---------------------------------------------------------------------------
@@ -113,6 +114,6 @@ Write-Host "=== Step 3: Pushing to https://$TargetHost/$TargetOrg ==="
 
 Write-Host ""
 Write-Host "=== Migration complete ==="
-Write-Host "Source : $SourceUrl"
+Write-Host "Sources: $sourceUrlsDisplay"
 Write-Host "Target : https://$TargetHost/$TargetOrg"
 Write-Host "OutDir : $OutDir"
